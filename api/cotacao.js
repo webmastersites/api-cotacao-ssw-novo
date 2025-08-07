@@ -88,6 +88,7 @@ function validateForSSW(i) {
   return i;
 }
 
+// ------------------------ Handler HTTP ------------------------
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método não permitido' });
@@ -137,7 +138,8 @@ export default async function handler(req, res) {
   // garante mercadoria padrão exigido pela SSW
   input.mercadoria = input.mercadoria || '1';
 
-  const soapUrl = 'https://www.ssw.inf.br/ws_cotacao/ssw_cotacao.asmx?wsdl';
+  // >>> WSDL CORRETA <<<
+  const soapUrl = 'https://ssw.inf.br/ws/sswCotacaoColeta/index.php?wsdl';
 
   const soapArgs = {
     dominio: input.dominio,
@@ -165,13 +167,35 @@ export default async function handler(req, res) {
 
   try {
     const client = await createClientAsync(soapUrl);
-    const [result] = await client.CalculaFreteAsync(soapArgs);
-    const resposta = result?.CalculaFreteResult;
+
+    // Descobre o método exposto neste WSDL
+    const methodName =
+      (client.cotarAsync && 'cotarAsync') ||
+      (client.CotarAsync && 'CotarAsync') ||
+      (client.cotarSiteAsync && 'cotarSiteAsync') ||
+      (client.CotarSiteAsync && 'CotarSiteAsync') ||
+      (client.CalculaFreteAsync && 'CalculaFreteAsync');
+
+    if (!methodName) {
+      throw new Error('Método SOAP não encontrado no WSDL (esperado: cotar ou cotarSite).');
+    }
+
+    const [result] = await client[methodName](soapArgs);
+
+    // Normaliza o nó de resultado
+    const resposta =
+      result?.cotarResult ??
+      result?.CotarResult ??
+      result?.cotarSiteResult ??
+      result?.CotarSiteResult ??
+      result?.CalculaFreteResult ??
+      result;
 
     return res.status(200).json({
-      valorFrete: resposta?.vlTotal,
-      prazoEntrega: resposta?.prazoEntrega,
-      numeroCotacao: resposta?.nrCotacao,
+      valorFrete: resposta?.vlTotal ?? resposta?.valorFrete ?? resposta?.vlFrete,
+      prazoEntrega: resposta?.prazoEntrega ?? resposta?.prazo,
+      numeroCotacao: resposta?.nrCotacao ?? resposta?.cotacao ?? resposta?.numeroCotacao,
+      token: resposta?.token // geralmente retornado por sswCotacaoColeta, útil para coleta posterior
     });
   } catch (err) {
     const status = err.status || 500;
