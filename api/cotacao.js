@@ -94,11 +94,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Método não permitido' });
   }
 
-  // --- Lê o body, mapeia nomes do seu payload -> nomes esperados, normaliza e valida
   const raw = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-
   const mapped = {
-    // iguais
     dominio: raw.dominio,
     login: raw.login,
     senha: raw.senha,
@@ -116,8 +113,6 @@ export default async function handler(req, res) {
     tipoFrete: raw.tipoFrete,
     tipoEntrega: raw.tipoEntrega,
     mercadoria: raw.mercadoria ?? '1',
-
-    // diferentes → mapeados
     valorNF: raw.valorMercadoria,
     quantidade: raw.quantidadeVolumes,
     cnpjRemetente: raw.remetente?.cnpj,
@@ -128,17 +123,13 @@ export default async function handler(req, res) {
   try {
     input = validateForSSW(sanitizeCotacaoInput(mapped));
   } catch (err) {
-    const status = err.status || 400;
-    return res.status(status).json({
+    return res.status(err.status || 400).json({
       error: 'Entrada inválida',
       details: err.message
     });
   }
 
-  // garante mercadoria padrão exigido pela SSW
   input.mercadoria = input.mercadoria || '1';
-
-  // >>> WSDL CORRETA <<<
   const soapUrl = 'https://ssw.inf.br/ws/sswCotacaoColeta/index.php?wsdl';
 
   const soapArgs = {
@@ -153,8 +144,8 @@ export default async function handler(req, res) {
     quantidade: input.quantidade,
     peso: input.peso,
     volume: input.volume,
-    mercadoria: input.mercadoria, // '1'
-    ciffob: input.ciffob,         // 'C' ou 'F'
+    mercadoria: input.mercadoria,
+    ciffob: input.ciffob,
     tipoFrete: input.tipoFrete,
     tipoEntrega: input.tipoEntrega,
     observacao: input.observacao,
@@ -167,8 +158,6 @@ export default async function handler(req, res) {
 
   try {
     const client = await createClientAsync(soapUrl);
-
-    // Descobre o método exposto neste WSDL
     const methodName =
       (client.cotarAsync && 'cotarAsync') ||
       (client.CotarAsync && 'CotarAsync') ||
@@ -177,33 +166,18 @@ export default async function handler(req, res) {
       (client.CalculaFreteAsync && 'CalculaFreteAsync');
 
     if (!methodName) {
-      throw new Error('Método SOAP não encontrado no WSDL (esperado: cotar ou cotarSite).');
+      throw new Error('Método SOAP não encontrado no WSDL.');
     }
 
     const [result] = await client[methodName](soapArgs);
 
-    // Normaliza o nó de resultado
-    const resposta =
-      result?.cotarResult ??
-      result?.CotarResult ??
-      result?.cotarSiteResult ??
-      result?.CotarSiteResult ??
-      result?.CalculaFreteResult ??
-      result;
+    // DEBUG: loga no console da Vercel e retorna resposta bruta
+    console.log('DEBUG SSW result:', JSON.stringify(result, null, 2));
+    return res.status(200).json(result);
 
-    return res.status(200).json({
-      valorFrete: resposta?.vlTotal ?? resposta?.valorFrete ?? resposta?.vlFrete,
-      prazoEntrega: resposta?.prazoEntrega ?? resposta?.prazo,
-      numeroCotacao: resposta?.nrCotacao ?? resposta?.cotacao ?? resposta?.numeroCotacao,
-      token: resposta?.token // geralmente retornado por sswCotacaoColeta, útil para coleta posterior
-    });
   } catch (err) {
     const status = err.status || 500;
-    console.error('[cotacao][erro]', {
-      status,
-      message: err.message,
-      stack: err.stack,
-    });
+    console.error('[cotacao][erro]', { status, message: err.message });
     return res.status(status).json({
       error: status === 400 ? 'Entrada inválida' : 'Erro ao consultar cotação na SSW',
       details: err.message
