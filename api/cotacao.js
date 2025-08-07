@@ -1,24 +1,31 @@
 import { createClientAsync } from 'soap';
 
-// ---- Helpers gerais ----
+// ---- Helpers ----
 const toStr = v => (v ?? '').toString().trim();
-const dec = (v) => {
+const dec = v => {
   if (v === undefined || v === null || v === '') return null;
   const s = toStr(v).replace(/\./g, '').replace(',', '.');
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 };
-const int = (v) => {
+const int = v => {
   if (v === undefined || v === null || v === '') return null;
   const n = parseInt(toStr(v).replace(/\D/g, ''), 10);
   return Number.isFinite(n) ? n : null;
 };
+const htmlUnescape = s =>
+  toStr(s)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, '&')
+    .replace(/&#39;/g, "'");
 
-// ---- Sanitização/validação da entrada ----
+// ---- Sanitização / validação ----
 function sanitizeCotacaoInput(raw) {
   const i = { ...raw };
 
-  i.dominio = toStr(i.dominio);
+  i.dominio = toStr(i.dominio).toUpperCase();
   i.login = toStr(i.login);
   i.senha = toStr(i.senha);
 
@@ -46,9 +53,6 @@ function sanitizeCotacaoInput(raw) {
   }
 
   i.ciffob = toStr(i.ciffob || i.cifFob).toUpperCase().replace(/[^CF]/g, '').charAt(0) || 'F';
-
-  i.coletar = toStr(i.coletar).toUpperCase().startsWith('S') ? 'S' : '';
-  i.entDificil = toStr(i.entDificil).toUpperCase().startsWith('S') ? 'S' : '';
   i.observacao = toStr(i.observacao).slice(0, 195);
 
   return i;
@@ -56,9 +60,6 @@ function sanitizeCotacaoInput(raw) {
 
 function validateForSSW(i) {
   const erros = [];
-  if (!i.dominio) erros.push('dominio é obrigatório');
-  if (!i.login) erros.push('login é obrigatório');
-  if (!i.senha) erros.push('senha é obrigatória');
   if (!i.cnpjPagador) erros.push('cnpjPagador é obrigatório');
   if (!i.cepOrigem) erros.push('cepOrigem é obrigatório');
   if (!i.cepDestino) erros.push('cepDestino é obrigatório');
@@ -73,10 +74,8 @@ function validateForSSW(i) {
   return i;
 }
 
-// ---- Parse simples do XML <cotacao> retornado pelo SSW ----
-// o WSDL sswCotacaoColeta devolve uma *string com XML*, ex.:
-// <cotacao><erro>0</erro><mensagem>OK</mensagem><frete>168,28</frete>...</cotacao>
-const extractCotacaoXml = (text) => {
+// ---- Parse XML ----
+const extractCotacaoXml = text => {
   if (!text) return null;
   const m = String(text).match(/<cotacao[\s\S]*?<\/cotacao>/i);
   return m ? m[0] : null;
@@ -87,26 +86,26 @@ const getTag = (xml, name) => {
   const mm = xml.match(re);
   return mm ? mm[1].trim() : null;
 };
-const decFromPt = (s) => {
+const decFromPt = s => {
   if (!s) return null;
   const n = Number(String(s).replace(/\./g, '').replace(',', '.'));
   return Number.isFinite(n) ? n : null;
 };
 
-// ------------------------ Handler HTTP ------------------------
+// ---- Handler ----
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método não permitido' });
   }
 
-  // Mapeia seu payload → nomes esperados pelo SSW
+  // Mapeia com credenciais fixas
   const raw = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
   const mapped = {
-    dominio: raw.dominio,
-    login: raw.login,
-    senha: raw.senha,
+    dominio: 'OST',
+    login: 'cotawa',
+    senha: '123456',
+    senhaPagador: '1234',
     cnpjPagador: raw.cnpjPagador,
-    senhaPagador: raw.senhaPagador,
     cepOrigem: raw.cepOrigem,
     cepDestino: raw.cepDestino,
     peso: raw.peso,
@@ -116,11 +115,9 @@ export default async function handler(req, res) {
     largura: raw.largura,
     comprimento: raw.comprimento,
     observacao: raw.observacao,
-    tipoFrete: raw.tipoFrete,
-    tipoEntrega: raw.tipoEntrega,
+    tipoFrete: raw.tipoFrete || '',
+    tipoEntrega: raw.tipoEntrega || '',
     mercadoria: raw.mercadoria ?? '1',
-
-    // renomeados
     valorNF: raw.valorMercadoria,
     quantidade: raw.quantidadeVolumes,
     cnpjRemetente: raw.remetente?.cnpj,
@@ -134,95 +131,66 @@ export default async function handler(req, res) {
     return res.status(err.status || 400).json({ error: 'Entrada inválida', details: err.message });
   }
 
-  input.mercadoria = input.mercadoria || '1';
+  input.mercadoria = '1';
 
-  // >>> WSDL correta do sswCotacaoColeta
   const soapUrl = 'https://ssw.inf.br/ws/sswCotacaoColeta/index.php?wsdl';
-
-  const soapArgs = {
-    dominio: input.dominio,
-    login: input.login,
-    senha: input.senha,
-    cnpjPagador: input.cnpjPagador,
-    senhaPagador: input.senhaPagador,
-    cepOrigem: input.cepOrigem,
-    cepDestino: input.cepDestino,
-    valorNF: input.valorNF,
-    quantidade: input.quantidade,
-    peso: input.peso,
-    volume: input.volume,
-    mercadoria: input.mercadoria,
-    ciffob: input.ciffob,
-    tipoFrete: input.tipoFrete,
-    tipoEntrega: input.tipoEntrega,
-    observacao: input.observacao,
-    cnpjRemetente: input.cnpjRemetente,
-    cnpjDestinatario: input.cnpjDestinatario,
-    altura: input.altura,
-    largura: input.largura,
-    comprimento: input.comprimento
-  };
+  const soapArgs = { ...input };
 
   try {
     const client = await createClientAsync(soapUrl);
+    client.setEndpoint('https://ssw.inf.br/ws/sswCotacaoColeta/index.php');
 
-    // métodos possíveis conforme help: cotar() / cotarSite()
-    const methodName =
-      (client.cotarAsync && 'cotarAsync') ||
-      (client.CotarAsync && 'CotarAsync') ||
-      (client.cotarSiteAsync && 'cotarSiteAsync') ||
-      (client.CotarSiteAsync && 'CotarSiteAsync');
+    const [resultObj, rawXml] = await client.cotarSiteAsync(soapArgs);
 
-    if (!methodName) {
-      throw new Error('Método SOAP não encontrado no WSDL (esperado: cotar/cotarSite).');
-    }
-
-    // node-soap retorna [resultObject, rawXml, soapHeader]
-    const [resultObj, rawXml] = await client[methodName](soapArgs);
-
-    // 1) tenta pegar string XML do próprio result (propriedade com XML)
-    let xmlString = null;
-    if (typeof resultObj === 'string') {
-      xmlString = resultObj;
-    } else {
-      const stringProps = Object.values(resultObj || {}).filter(v => typeof v === 'string');
-      // pega a primeira string que contenha <cotacao>...</cotacao>
-      xmlString = stringProps.find(s => /<cotacao[\s\S]*?<\/cotacao>/i.test(s)) || null;
-    }
-
-    // 2) se não achar no result, tenta extrair do rawXml (envelope SOAP inteiro)
-    if (!xmlString && typeof rawXml === 'string') {
-      xmlString = extractCotacaoXml(rawXml);
-    }
-
+    let xmlString = resultObj?.return?.$value || '';
     if (!xmlString) {
-      // retorna tudo para debug se não encontrou o XML esperado
-      console.log('DEBUG SSW: resultObj=', JSON.stringify(resultObj), 'RAW=', rawXml?.slice?.(0, 500));
-      return res.status(200).json({ debug: { resultObj, rawSnippet: typeof rawXml === 'string' ? rawXml.slice(0, 1000) : rawXml } });
+      const scan = obj => {
+        if (!obj || typeof obj !== 'object') return null;
+        for (const v of Object.values(obj)) {
+          if (typeof v === 'string' && /<cotacao[\s\S]*?<\/cotacao>/i.test(v)) return v;
+          if (v && typeof v === 'object') {
+            const inner = scan(v);
+            if (inner) return inner;
+          }
+        }
+        return null;
+      };
+      xmlString = scan(resultObj) || '';
     }
 
-    // Extrai campos do XML <cotacao>
-    const cotacaoXml = extractCotacaoXml(xmlString) || xmlString;
+    const cotacaoXml = extractCotacaoXml(xmlString);
+    if (!cotacaoXml) {
+      return res.status(200).json({
+        debug: { resultObj, rawSnippet: typeof rawXml === 'string' ? rawXml.slice(0, 1000) : rawXml }
+      });
+    }
+
     const erro = int(getTag(cotacaoXml, 'erro'));
     const mensagem = toStr(getTag(cotacaoXml, 'mensagem'));
     const fretePt = getTag(cotacaoXml, 'frete');
     const prazo = int(getTag(cotacaoXml, 'prazo'));
     const cotacaoNum = toStr(getTag(cotacaoXml, 'cotacao'));
     const token = toStr(getTag(cotacaoXml, 'token'));
-
     const valorFrete = decFromPt(fretePt);
+
+    if (Number.isFinite(erro) && erro !== 0) {
+      const code = (erro === -2 || /LOGIN/i.test(mensagem)) ? 401 : 422;
+      return res.status(code).json({
+        error: 'SSW retornou erro',
+        ssw: { erro, mensagem },
+        detalhes: { cotacaoXml }
+      });
+    }
 
     return res.status(200).json({
       ok: true,
-      erro,
-      mensagem,
       valorFrete,
       prazoEntrega: prazo,
       numeroCotacao: cotacaoNum,
       token,
-      xml: cotacaoXml // mantém bruto para auditoria
+      mensagem,
+      xml: cotacaoXml
     });
-
   } catch (err) {
     const status = err.status || 500;
     console.error('[cotacao][erro]', { status, message: err.message });
