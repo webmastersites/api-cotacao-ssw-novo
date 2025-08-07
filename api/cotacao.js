@@ -1,48 +1,41 @@
 import { createClientAsync } from 'soap';
 
-// ---- Sanitização e normalização de entrada (helpers) ----
+// ---- Helpers gerais ----
 const toStr = v => (v ?? '').toString().trim();
-
 const dec = (v) => {
   if (v === undefined || v === null || v === '') return null;
-  // remove separador de milhar "." e troca vírgula por ponto
   const s = toStr(v).replace(/\./g, '').replace(',', '.');
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 };
-
 const int = (v) => {
   if (v === undefined || v === null || v === '') return null;
   const n = parseInt(toStr(v).replace(/\D/g, ''), 10);
   return Number.isFinite(n) ? n : null;
 };
 
+// ---- Sanitização/validação da entrada ----
 function sanitizeCotacaoInput(raw) {
   const i = { ...raw };
 
-  // credenciais e básicos
   i.dominio = toStr(i.dominio);
   i.login = toStr(i.login);
   i.senha = toStr(i.senha);
 
-  // CNPJs / CEPs só dígitos
   i.cnpjPagador = toStr(i.cnpjPagador).replace(/\D/g, '');
   i.cnpjRemetente = toStr(i.cnpjRemetente).replace(/\D/g, '');
   i.cnpjDestinatario = toStr(i.cnpjDestinatario).replace(/\D/g, '');
   i.cepOrigem = toStr(i.cepOrigem).replace(/\D/g, '');
   i.cepDestino = toStr(i.cepDestino).replace(/\D/g, '');
 
-  // numéricos
   i.valorNF = dec(i.valorNF) ?? 0;
   i.quantidade = int(i.quantidade) ?? 1;
   i.peso = dec(i.peso) ?? 0;
 
-  // dimensões (em metros)
   i.altura = dec(i.altura);
   i.largura = dec(i.largura);
   i.comprimento = dec(i.comprimento);
 
-  // volume: usa o informado se > 0; senão calcula de A*L*C*qtd
   const volumeInformado = dec(i.volume);
   if (volumeInformado && volumeInformado > 0) {
     i.volume = Number(volumeInformado.toFixed(4));
@@ -52,13 +45,8 @@ function sanitizeCotacaoInput(raw) {
     i.volume = 0;
   }
 
-  // CIF/FOB -> C ou F
-  i.ciffob = toStr(i.ciffob || i.cifFob)
-    .toUpperCase()
-    .replace(/[^CF]/g, '')
-    .charAt(0) || 'F';
+  i.ciffob = toStr(i.ciffob || i.cifFob).toUpperCase().replace(/[^CF]/g, '').charAt(0) || 'F';
 
-  // flags e observação
   i.coletar = toStr(i.coletar).toUpperCase().startsWith('S') ? 'S' : '';
   i.entDificil = toStr(i.entDificil).toUpperCase().startsWith('S') ? 'S' : '';
   i.observacao = toStr(i.observacao).slice(0, 195);
@@ -75,10 +63,7 @@ function validateForSSW(i) {
   if (!i.cepOrigem) erros.push('cepOrigem é obrigatório');
   if (!i.cepDestino) erros.push('cepDestino é obrigatório');
   if ((i.valorNF ?? 0) <= 0) erros.push('valorNF deve ser > 0');
-  // informar peso ou volume; não podem ambos estar zerados
-  if ((i.peso ?? 0) <= 0 && (i.volume ?? 0) <= 0) {
-    erros.push('informe peso (>0) ou volume (>0)');
-  }
+  if ((i.peso ?? 0) <= 0 && (i.volume ?? 0) <= 0) erros.push('informe peso (>0) ou volume (>0)');
   if (!['C', 'F'].includes(i.ciffob)) erros.push('ciffob deve ser C ou F');
   if (erros.length) {
     const e = new Error(erros.join('; '));
@@ -88,17 +73,35 @@ function validateForSSW(i) {
   return i;
 }
 
+// ---- Parse simples do XML <cotacao> retornado pelo SSW ----
+// o WSDL sswCotacaoColeta devolve uma *string com XML*, ex.:
+// <cotacao><erro>0</erro><mensagem>OK</mensagem><frete>168,28</frete>...</cotacao>
+const extractCotacaoXml = (text) => {
+  if (!text) return null;
+  const m = String(text).match(/<cotacao[\s\S]*?<\/cotacao>/i);
+  return m ? m[0] : null;
+};
+const getTag = (xml, name) => {
+  if (!xml) return null;
+  const re = new RegExp(`<${name}>([\\s\\S]*?)<\\/${name}>`, 'i');
+  const mm = xml.match(re);
+  return mm ? mm[1].trim() : null;
+};
+const decFromPt = (s) => {
+  if (!s) return null;
+  const n = Number(String(s).replace(/\./g, '').replace(',', '.'));
+  return Number.isFinite(n) ? n : null;
+};
+
 // ------------------------ Handler HTTP ------------------------
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Método não permitido' });
   }
 
-  // --- Lê o body, mapeia nomes do seu payload -> nomes esperados, normaliza e valida
+  // Mapeia seu payload → nomes esperados pelo SSW
   const raw = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-
   const mapped = {
-    // iguais
     dominio: raw.dominio,
     login: raw.login,
     senha: raw.senha,
@@ -117,7 +120,7 @@ export default async function handler(req, res) {
     tipoEntrega: raw.tipoEntrega,
     mercadoria: raw.mercadoria ?? '1',
 
-    // diferentes → mapeados
+    // renomeados
     valorNF: raw.valorMercadoria,
     quantidade: raw.quantidadeVolumes,
     cnpjRemetente: raw.remetente?.cnpj,
@@ -128,17 +131,12 @@ export default async function handler(req, res) {
   try {
     input = validateForSSW(sanitizeCotacaoInput(mapped));
   } catch (err) {
-    const status = err.status || 400;
-    return res.status(status).json({
-      error: 'Entrada inválida',
-      details: err.message
-    });
+    return res.status(err.status || 400).json({ error: 'Entrada inválida', details: err.message });
   }
 
-  // garante mercadoria padrão exigido pela SSW
   input.mercadoria = input.mercadoria || '1';
 
-  // >>> WSDL CORRETA <<<
+  // >>> WSDL correta do sswCotacaoColeta
   const soapUrl = 'https://ssw.inf.br/ws/sswCotacaoColeta/index.php?wsdl';
 
   const soapArgs = {
@@ -153,8 +151,8 @@ export default async function handler(req, res) {
     quantidade: input.quantidade,
     peso: input.peso,
     volume: input.volume,
-    mercadoria: input.mercadoria, // '1'
-    ciffob: input.ciffob,         // 'C' ou 'F'
+    mercadoria: input.mercadoria,
+    ciffob: input.ciffob,
     tipoFrete: input.tipoFrete,
     tipoEntrega: input.tipoEntrega,
     observacao: input.observacao,
@@ -168,42 +166,66 @@ export default async function handler(req, res) {
   try {
     const client = await createClientAsync(soapUrl);
 
-    // Descobre o método exposto neste WSDL
+    // métodos possíveis conforme help: cotar() / cotarSite()
     const methodName =
       (client.cotarAsync && 'cotarAsync') ||
       (client.CotarAsync && 'CotarAsync') ||
       (client.cotarSiteAsync && 'cotarSiteAsync') ||
-      (client.CotarSiteAsync && 'CotarSiteAsync') ||
-      (client.CalculaFreteAsync && 'CalculaFreteAsync');
+      (client.CotarSiteAsync && 'CotarSiteAsync');
 
     if (!methodName) {
-      throw new Error('Método SOAP não encontrado no WSDL (esperado: cotar ou cotarSite).');
+      throw new Error('Método SOAP não encontrado no WSDL (esperado: cotar/cotarSite).');
     }
 
-    const [result] = await client[methodName](soapArgs);
+    // node-soap retorna [resultObject, rawXml, soapHeader]
+    const [resultObj, rawXml] = await client[methodName](soapArgs);
 
-    // Normaliza o nó de resultado
-    const resposta =
-      result?.cotarResult ??
-      result?.CotarResult ??
-      result?.cotarSiteResult ??
-      result?.CotarSiteResult ??
-      result?.CalculaFreteResult ??
-      result;
+    // 1) tenta pegar string XML do próprio result (propriedade com XML)
+    let xmlString = null;
+    if (typeof resultObj === 'string') {
+      xmlString = resultObj;
+    } else {
+      const stringProps = Object.values(resultObj || {}).filter(v => typeof v === 'string');
+      // pega a primeira string que contenha <cotacao>...</cotacao>
+      xmlString = stringProps.find(s => /<cotacao[\s\S]*?<\/cotacao>/i.test(s)) || null;
+    }
+
+    // 2) se não achar no result, tenta extrair do rawXml (envelope SOAP inteiro)
+    if (!xmlString && typeof rawXml === 'string') {
+      xmlString = extractCotacaoXml(rawXml);
+    }
+
+    if (!xmlString) {
+      // retorna tudo para debug se não encontrou o XML esperado
+      console.log('DEBUG SSW: resultObj=', JSON.stringify(resultObj), 'RAW=', rawXml?.slice?.(0, 500));
+      return res.status(200).json({ debug: { resultObj, rawSnippet: typeof rawXml === 'string' ? rawXml.slice(0, 1000) : rawXml } });
+    }
+
+    // Extrai campos do XML <cotacao>
+    const cotacaoXml = extractCotacaoXml(xmlString) || xmlString;
+    const erro = int(getTag(cotacaoXml, 'erro'));
+    const mensagem = toStr(getTag(cotacaoXml, 'mensagem'));
+    const fretePt = getTag(cotacaoXml, 'frete');
+    const prazo = int(getTag(cotacaoXml, 'prazo'));
+    const cotacaoNum = toStr(getTag(cotacaoXml, 'cotacao'));
+    const token = toStr(getTag(cotacaoXml, 'token'));
+
+    const valorFrete = decFromPt(fretePt);
 
     return res.status(200).json({
-      valorFrete: resposta?.vlTotal ?? resposta?.valorFrete ?? resposta?.vlFrete,
-      prazoEntrega: resposta?.prazoEntrega ?? resposta?.prazo,
-      numeroCotacao: resposta?.nrCotacao ?? resposta?.cotacao ?? resposta?.numeroCotacao,
-      token: resposta?.token // geralmente retornado por sswCotacaoColeta, útil para coleta posterior
+      ok: true,
+      erro,
+      mensagem,
+      valorFrete,
+      prazoEntrega: prazo,
+      numeroCotacao: cotacaoNum,
+      token,
+      xml: cotacaoXml // mantém bruto para auditoria
     });
+
   } catch (err) {
     const status = err.status || 500;
-    console.error('[cotacao][erro]', {
-      status,
-      message: err.message,
-      stack: err.stack,
-    });
+    console.error('[cotacao][erro]', { status, message: err.message });
     return res.status(status).json({
       error: status === 400 ? 'Entrada inválida' : 'Erro ao consultar cotação na SSW',
       details: err.message
