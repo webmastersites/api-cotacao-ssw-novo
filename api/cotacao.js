@@ -69,13 +69,17 @@ export default async function handler(req, res) {
     const client = await createClientAsync(soapUrl);
 
     const [result] = await client.cotarSiteAsync(args);
+
+    // Captura do XML enviado
+    const lastRequest = client.lastRequest || null;
+
     const rawXml = result?.return?._ || result?.return || '';
 
     if (!rawXml) {
       return res.status(422).json({
         error: 'SSW retornou resposta vazia',
         sentArgs: args,
-        lastRequest: client.lastRequest || null
+        lastRequest
       });
     }
 
@@ -88,7 +92,7 @@ export default async function handler(req, res) {
         ssw: cotacao,
         detalhes: { cotacaoXml: rawXml },
         sentArgs: args,
-        lastRequest: client.lastRequest || null
+        lastRequest
       });
     }
 
@@ -97,7 +101,8 @@ export default async function handler(req, res) {
       prazo: cotacao.prazo,
       cotacao: cotacao.cotacao,
       token: cotacao.token,
-      mensagem: cotacao.mensagem
+      mensagem: cotacao.mensagem,
+      lastRequest
     });
   } catch (err) {
     console.error('Erro na requisição SOAP:', err);
