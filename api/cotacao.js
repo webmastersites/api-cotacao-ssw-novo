@@ -27,6 +27,14 @@ const fmt = (n, places) => {
   return Number.isFinite(x) ? x.toFixed(places) : '';
 };
 
+// CPF (11 dígitos) -> CNPJ 14 dígitos (zeros à esquerda)
+const zeroPadCpfToCnpj = (digits) => {
+  if (!digits) return digits;
+  if (digits.length === 11) return digits.padStart(14, '0');
+  return digits;
+};
+
+// XML utils
 const extractCotacaoXml = (text) => {
   if (!text) return null;
   const m = String(text).match(/<cotacao[\s\S]*?<\/cotacao>/i);
@@ -59,10 +67,11 @@ export default async function handler(req, res) {
     const senha = '123456';
     const senhaPagador = '1234';
 
-    // sanitização
-    const cnpjPagador = onlyDigits(b.cnpjPagador);
-    const cnpjRemetente = onlyDigits(b.remetente?.cnpj);
-    const cnpjDestinatario = onlyDigits(b.destinatario?.cnpj);
+    // sanitização + zeropad
+    const cnpjPagador = zeroPadCpfToCnpj(onlyDigits(b.cnpjPagador));
+    const cnpjRemetente = zeroPadCpfToCnpj(onlyDigits(b.remetente?.cnpj));
+    const cnpjDestinatario = zeroPadCpfToCnpj(onlyDigits(b.destinatario?.cnpj));
+
     const cepOrigem = onlyDigits(b.cepOrigem);
     const cepDestino = onlyDigits(b.cepDestino);
 
@@ -79,17 +88,16 @@ export default async function handler(req, res) {
     const observacao = toStr(b.observacao).slice(0, 195);
     const mercadoria = '1';
 
-    // coletar obrigatório: "S" ou "N"
     const coletar = toStr(b.coletar).toUpperCase().startsWith('S') ? 'S' : 'N';
 
-    // extras do WSDL (vamos enviar vazios)
+    // extras vazios do WSDL
     const trt = '';
     const entDificil = '';
     const destContribuinte = '';
-    const qtdePares = '';          // integer opcional – vazio
-    const fatorMultiplicador = ''; // integer opcional – vazio
+    const qtdePares = '';
+    const fatorMultiplicador = '';
 
-    // validações básicas
+    // validações
     const errs = [];
     if (!cnpjPagador) errs.push('cnpjPagador é obrigatório');
     if (!cepOrigem) errs.push('cepOrigem é obrigatório');
@@ -101,7 +109,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Entrada inválida', details: errs.join('; ') });
     }
 
-    // MONTAÇÃO EM ORDEM EXATA DO WSDL (rpc/encoded é chato com ordem):
+    // ORDEM EXATA DO WSDL
     const orderedEntries = [
       ['dominio', dominio],
       ['login', login],
@@ -110,17 +118,17 @@ export default async function handler(req, res) {
       ['senhaPagador', senhaPagador],
       ['cepOrigem', cepOrigem],
       ['cepDestino', cepDestino],
-      ['valorNF', fmt(valorNFnum, 2)],                 // 1500.00
-      ['quantidade', String(quantidade)],              // "1"
-      ['peso', fmt(pesoNum, 3)],                       // 23.000
-      ['volume', volumeNum != null ? fmt(volumeNum, 4) : ''], // 0.2700
+      ['valorNF', fmt(valorNFnum, 2)],
+      ['quantidade', String(quantidade)],
+      ['peso', fmt(pesoNum, 3)],
+      ['volume', volumeNum != null ? fmt(volumeNum, 4) : ''],
       ['mercadoria', mercadoria],
       ['ciffob', ciffob],
       ['cnpjRemetente', cnpjRemetente || ''],
       ['cnpjDestinatario', cnpjDestinatario || ''],
       ['observacao', observacao],
       ['trt', trt],
-      ['coletar', coletar],              // <<< AQUI, na posição certa
+      ['coletar', coletar],
       ['entDificil', entDificil],
       ['destContribuinte', destContribuinte],
       ['qtdePares', qtdePares],
@@ -138,7 +146,6 @@ export default async function handler(req, res) {
     const [result, rawResponse, soapHeader, rawRequest] = await client.cotarSiteAsync(soapArgs);
     const lastRequest = client.lastRequest || rawRequest || null;
 
-    // tenta obter XML de retorno
     let xmlCandidate = null;
     if (result && typeof result === 'object') {
       const r = result.return;
