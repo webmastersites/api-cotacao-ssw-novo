@@ -3,16 +3,36 @@ import { createClientAsync } from 'soap';
 // ---------- helpers ----------
 const toStr = v => (v ?? '').toString().trim();
 const onlyDigits = s => toStr(s).replace(/\D/g, '');
+
+// Normaliza decimal aceitando ambos formatos:
+// - "1.500,00" -> "1500.00"
+// - "1500.00"  -> "1500.00"
+// - "0,27"     -> "0.27"
+// - "0.27"     -> "0.27"
+const normDecimalStr = (val) => {
+  if (val === undefined || val === null || val === '') return null;
+  const s = toStr(val);
+  if (s.includes(',')) {
+    // tem vírgula -> remover pontos de milhar e trocar vírgula por ponto
+    return s.replace(/\./g, '').replace(',', '.');
+  }
+  // sem vírgula -> manter ponto como decimal
+  return s;
+};
+
 const toDec = v => {
-  if (v === undefined || v === null || v === '') return null;
-  const n = Number(toStr(v).replace(/\./g, '').replace(',', '.'));
+  const s = normDecimalStr(v);
+  if (s === null) return null;
+  const n = Number(s);
   return Number.isFinite(n) ? n : null;
 };
+
 const toInt = v => {
   if (v === undefined || v === null || v === '') return null;
   const n = parseInt(onlyDigits(v), 10);
   return Number.isFinite(n) ? n : null;
 };
+
 const fmt = (n, places) => {
   const x = Number(n);
   return Number.isFinite(x) ? x.toFixed(places) : '';
@@ -44,7 +64,7 @@ export default async function handler(req, res) {
   try {
     const b = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
 
-    // credenciais fixas (como você pediu)
+    // credenciais fixas
     const dominio = 'OST';
     const login = 'cotawa';
     const senha = '123456';
@@ -69,6 +89,7 @@ export default async function handler(req, res) {
     const ciffob = toStr(b.ciffob).toUpperCase().replace(/[^CF]/g, '').charAt(0) || 'F';
     const observacao = toStr(b.observacao).slice(0, 195);
     const mercadoria = '1';
+    const coletar = toStr(b.coletar).toUpperCase().startsWith('S') ? 'S' : 'N'; // default N conforme erro da SSW
 
     // validações essenciais
     const errs = [];
@@ -87,9 +108,9 @@ export default async function handler(req, res) {
       dominio, login, senha,
       cnpjPagador, senhaPagador,
       cepOrigem, cepDestino,
-      valorNF: fmt(valorNFnum, 2),            // "1500.00"
-      quantidade: String(quantidade),         // "1"
-      peso: fmt(pesoNum, 3),                  // "23.000"
+      valorNF: fmt(valorNFnum, 2),                  // "1500.00"
+      quantidade: String(quantidade),               // "1"
+      peso: fmt(pesoNum, 3),                        // "23.000"
       volume: volumeNum != null ? fmt(volumeNum, 4) : "", // "0.2700" ou ""
       mercadoria, ciffob,
       cnpjRemetente: cnpjRemetente || "",
@@ -97,50 +118,38 @@ export default async function handler(req, res) {
       observacao,
       altura: alturaNum != null ? fmt(alturaNum, 3) : "",
       largura: larguraNum != null ? fmt(larguraNum, 3) : "",
-      comprimento: comprimentoNum != null ? fmt(comprimentoNum, 3) : ""
+      comprimento: comprimentoNum != null ? fmt(comprimentoNum, 3) : "",
+      coletar // "S" ou "N" — exigido pela SSW
     };
 
     const soapUrl = 'https://ssw.inf.br/ws/sswCotacaoColeta/index.php?wsdl';
     const client = await createClientAsync(soapUrl);
     client.setEndpoint('https://ssw.inf.br/ws/sswCotacaoColeta/index.php');
 
-    // chame e capture TUDO (result + rawResponse + rawRequest)
     const [result, rawResponse, soapHeader, rawRequest] = await client.cotarSiteAsync(soapArgs);
     const lastRequest = client.lastRequest || rawRequest || null;
 
-    // tente obter XML de retorno por etapas
+    // tentar obter XML de retorno
     let xmlCandidate = null;
-
-    // 1) retorno comum do node-soap
     if (result && typeof result === 'object') {
       const r = result.return;
       if (r && typeof r === 'object' && typeof r.$value === 'string') xmlCandidate = r.$value;
       else if (typeof r === 'string') xmlCandidate = r;
     }
-    // 2) se não, use o rawResponse (SOAP envelope)
     if (!xmlCandidate && typeof rawResponse === 'string') {
-      // se vier um envelope SOAP, extraímos só o <cotacao> dele
       const extracted = extractCotacaoXml(rawResponse);
       if (extracted) xmlCandidate = extracted;
     }
-
-    // 3) se ainda não temos xmlCandidate, devolvemos debug completo
     if (!xmlCandidate) {
       return res.status(200).json({
         debug: true,
         message: 'Sem bloco <cotacao> detectado na resposta',
         sentArgs: soapArgs,
-        types: {
-          resultType: typeof result,
-          resultReturnType: typeof result?.return,
-          rawResponseType: typeof rawResponse
-        },
         rawResponseSnippet: typeof rawResponse === 'string' ? rawResponse.slice(0, 1500) : null,
         lastRequest
       });
     }
 
-    // Se xmlCandidate for apenas o bloco <cotacao>, beleza. Se for string grande, ainda tentamos refinar:
     const cotacaoXml = extractCotacaoXml(xmlCandidate) || xmlCandidate;
 
     const erro = parseInt(getTag(cotacaoXml, 'erro') || '0', 10);
