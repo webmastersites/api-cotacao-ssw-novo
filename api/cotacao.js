@@ -1,203 +1,289 @@
-import { createClientAsync } from 'soap';
+// api/cotacao.js
+// Vercel/Next API Route
 
-// ---------- helpers ----------
-const toStr = v => (v ?? '').toString().trim();
-const onlyDigits = s => toStr(s).replace(/\D/g, '');
+const axios = require('axios');
+const { parseStringPromise } = require('xml2js');
 
-// "1.500,00"->"1500.00", "1500.00"->"1500.00", "0,27"->"0.27", "0.27"->"0.27"
-const normDecimalStr = (val) => {
-  if (val === undefined || val === null || val === '') return null;
-  const s = toStr(val);
-  if (s.includes(',')) return s.replace(/\./g, '').replace(',', '.');
-  return s;
+// ============ utils ============
+const onlyDigits = (v) => (v ?? '').toString().replace(/\D+/g, '');
+const toFixedOrZero = (n, d = 2) => {
+  const x = parseFloat(String(n).replace(',', '.'));
+  return isNaN(x) ? (0).toFixed(d) : x.toFixed(d);
 };
-const toDec = v => {
-  const s = normDecimalStr(v);
-  if (s === null) return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
+const toUpper = (v) => (v ?? '').toString().trim().toUpperCase();
+const padCpfToCnpj = (doc) => {
+  const d = onlyDigits(doc);
+  if (!d) return '';
+  return d.length === 11 ? d.padStart(14, '0') : d;
 };
-const toInt = v => {
-  if (v === undefined || v === null || v === '') return null;
-  const n = parseInt(onlyDigits(v), 10);
-  return Number.isFinite(n) ? n : null;
-};
-const fmt = (n, places) => {
-  const x = Number(n);
-  return Number.isFinite(x) ? x.toFixed(places) : '';
+const parseFrete = (s) => {
+  if (!s) return 0;
+  // SSW retorna com vírgula decimal. Ex.: "159,77"
+  const n = parseFloat(String(s).replace('.', '').replace(',', '.'));
+  return isNaN(n) ? 0 : +n.toFixed(2);
 };
 
-// CPF (11 dígitos) -> CNPJ 14 dígitos (zeros à esquerda)
-const zeroPadCpfToCnpj = (digits) => {
-  if (!digits) return digits;
-  if (digits.length === 11) return digits.padStart(14, '0');
-  return digits;
-};
+// ============ validação básica ============
+function validateBody(body) {
+  const err = [];
 
-// XML utils
-const extractCotacaoXml = (text) => {
-  if (!text) return null;
-  const m = String(text).match(/<cotacao[\s\S]*?<\/cotacao>/i);
-  return m ? m[0] : null;
-};
-const getTag = (xml, name) => {
-  if (!xml) return null;
-  const re = new RegExp(`<${name}>([\\s\\S]*?)<\\/${name}>`, 'i');
-  const mm = xml.match(re);
-  return mm ? mm[1].trim() : null;
-};
-const decFromPt = (s) => {
-  if (!s) return null;
-  const n = Number(String(s).replace(/\./g, '').replace(',', '.'));
-  return Number.isFinite(n) ? n : null;
-};
+  const cnpjPagador = padCpfToCnpj(body.cnpjPagador);
+  if (!cnpjPagador) err.push('cnpjPagador é obrigatório');
 
-// ---------- handler ----------
-export default async function handler(req, res) {
+  const cepOrigem = onlyDigits(body.cepOrigem);
+  if (!cepOrigem) err.push('cepOrigem é obrigatório');
+
+  const cepDestino = onlyDigits(body.cepDestino);
+  if (!cepDestino) err.push('cepDestino é obrigatório');
+
+  // valor pode vir como valorMercadoria OU valorNF
+  const valorMercadoriaRaw = body.valorMercadoria ?? body.valorNF;
+  const valorMercadoria = parseFloat(String(valorMercadoriaRaw ?? '').replace(',', '.'));
+  if (isNaN(valorMercadoria) || valorMercadoria <= 0) {
+    err.push('valorMercadoria deve ser > 0');
+  }
+
+  const peso = parseFloat(String(body.peso ?? '').replace(',', '.'));
+  const volume = parseFloat(String(body.volume ?? '').replace(',', '.'));
+  if (!(peso > 0) && !(volume > 0)) {
+    err.push('informe peso (>0) ou volume (>0)');
+  }
+
+  return { ok: err.length === 0, errors: err };
+}
+
+// ============ monta envelope SOAP ============
+function buildSoapEnvelope(args) {
+  // Todos os campos tratados/normalizados já devem vir em args
+  const {
+    dominio,
+    login,
+    senha,
+    cnpjPagador,
+    senhaPagador,
+    cepOrigem,
+    cepDestino,
+    valorNF, // string com 2 casas
+    quantidade,
+    peso,     // string com 3 casas
+    volume,   // string com 4 casas
+    mercadoria,
+    ciffob,   // 'C' ou 'F'
+    cnpjRemetente,
+    cnpjDestinatario,
+    observacao,
+    trt,
+    coletar, // 'S' ou 'N'
+    entDificil,
+    destContribuinte,
+    qtdePares,
+    altura,  // 3 casas
+    largura, // 3 casas
+    comprimento, // 3 casas
+    fatorMultiplicador
+  } = args;
+
+  // Atenção: cotarSite segundo o WSDL
+  return `<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"  xmlns:tns="urn:sswinfbr.sswCotacaoColeta">
+  <soap:Body>
+    <tns:cotarSite>
+      <dominio>${dominio}</dominio>
+      <login>${login}</login>
+      <senha>${senha}</senha>
+      <cnpjPagador>${cnpjPagador}</cnpjPagador>
+      <senhaPagador>${senhaPagador}</senhaPagador>
+      <cepOrigem>${cepOrigem}</cepOrigem>
+      <cepDestino>${cepDestino}</cepDestino>
+      <valorNF>${valorNF}</valorNF>
+      <quantidade>${quantidade}</quantidade>
+      <peso>${peso}</peso>
+      <volume>${volume}</volume>
+      <mercadoria>${mercadoria}</mercadoria>
+      <ciffob>${ciffob}</ciffob>
+      <cnpjRemetente>${cnpjRemetente}</cnpjRemetente>
+      <cnpjDestinatario>${cnpjDestinatario}</cnpjDestinatario>
+      <observacao>${observacao}</observacao>
+      <trt>${trt}</trt>
+      <coletar>${coletar}</coletar>
+      <entDificil>${entDificil}</entDificil>
+      <destContribuinte>${destContribuinte}</destContribuinte>
+      <qtdePares>${qtdePares}</qtdePares>
+      <altura>${altura}</altura>
+      <largura>${largura}</largura>
+      <comprimento>${comprimento}</comprimento>
+      <fatorMultiplicador>${fatorMultiplicador}</fatorMultiplicador>
+    </tns:cotarSite>
+  </soap:Body>
+</soap:Envelope>`;
+}
+
+// ============ handler ============
+module.exports = async function handler(req, res) {
+  if (req.method === 'OPTIONS') {
+    // CORS preflight
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    return res.status(204).end();
+  }
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Método não permitido' });
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    const b = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+    const body = req.body || {};
 
-    // credenciais fixas
-    const dominio = 'OST';
-    const login = 'cotawa';
-    const senha = '123456';
-    const senhaPagador = '1234';
-
-    // sanitização + zeropad
-    const cnpjPagador = zeroPadCpfToCnpj(onlyDigits(b.cnpjPagador));
-    const cnpjRemetente = zeroPadCpfToCnpj(onlyDigits(b.remetente?.cnpj));
-    const cnpjDestinatario = zeroPadCpfToCnpj(onlyDigits(b.destinatario?.cnpj));
-
-    const cepOrigem = onlyDigits(b.cepOrigem);
-    const cepDestino = onlyDigits(b.cepDestino);
-
-    const valorNFnum = toDec(b.valorMercadoria);
-    const quantidade = toInt(b.quantidadeVolumes) ?? 1;
-    const pesoNum = toDec(b.peso);
-    const volumeNum = toDec(b.volume);
-
-    const alturaNum = toDec(b.altura);
-    const larguraNum = toDec(b.largura);
-    const comprimentoNum = toDec(b.comprimento);
-
-    const ciffob = toStr(b.ciffob).toUpperCase().replace(/[^CF]/g, '').charAt(0) || 'F';
-    const observacao = toStr(b.observacao).slice(0, 195);
-    const mercadoria = '1';
-
-    const coletar = toStr(b.coletar).toUpperCase().startsWith('S') ? 'S' : 'N';
-
-    // extras vazios do WSDL
-    const trt = '';
-    const entDificil = '';
-    const destContribuinte = '';
-    const qtdePares = '';
-    const fatorMultiplicador = '';
-
-    // validações
-    const errs = [];
-    if (!cnpjPagador) errs.push('cnpjPagador é obrigatório');
-    if (!cepOrigem) errs.push('cepOrigem é obrigatório');
-    if (!cepDestino) errs.push('cepDestino é obrigatório');
-    if (!(valorNFnum > 0)) errs.push('valorMercadoria deve ser > 0');
-    if (!['C', 'F'].includes(ciffob)) errs.push('ciffob deve ser C ou F');
-    if (!((pesoNum ?? 0) > 0) && !((volumeNum ?? 0) > 0)) errs.push('informe peso (>0) ou volume (>0)');
-    if (errs.length) {
-      return res.status(400).json({ error: 'Entrada inválida', details: errs.join('; ') });
-    }
-
-    // ORDEM EXATA DO WSDL
-    const orderedEntries = [
-      ['dominio', dominio],
-      ['login', login],
-      ['senha', senha],
-      ['cnpjPagador', cnpjPagador],
-      ['senhaPagador', senhaPagador],
-      ['cepOrigem', cepOrigem],
-      ['cepDestino', cepDestino],
-      ['valorNF', fmt(valorNFnum, 2)],
-      ['quantidade', String(quantidade)],
-      ['peso', fmt(pesoNum, 3)],
-      ['volume', volumeNum != null ? fmt(volumeNum, 4) : ''],
-      ['mercadoria', mercadoria],
-      ['ciffob', ciffob],
-      ['cnpjRemetente', cnpjRemetente || ''],
-      ['cnpjDestinatario', cnpjDestinatario || ''],
-      ['observacao', observacao],
-      ['trt', trt],
-      ['coletar', coletar],
-      ['entDificil', entDificil],
-      ['destContribuinte', destContribuinte],
-      ['qtdePares', qtdePares],
-      ['altura', alturaNum != null ? fmt(alturaNum, 3) : ''],
-      ['largura', larguraNum != null ? fmt(larguraNum, 3) : ''],
-      ['comprimento', comprimentoNum != null ? fmt(comprimentoNum, 3) : ''],
-      ['fatorMultiplicador', fatorMultiplicador]
-    ];
-    const soapArgs = orderedEntries.reduce((acc, [k, v]) => { acc[k] = v; return acc; }, {});
-
-    const soapUrl = 'https://ssw.inf.br/ws/sswCotacaoColeta/index.php?wsdl';
-    const client = await createClientAsync(soapUrl);
-    client.setEndpoint('https://ssw.inf.br/ws/sswCotacaoColeta/index.php');
-
-    const [result, rawResponse, soapHeader, rawRequest] = await client.cotarSiteAsync(soapArgs);
-    const lastRequest = client.lastRequest || rawRequest || null;
-
-    let xmlCandidate = null;
-    if (result && typeof result === 'object') {
-      const r = result.return;
-      if (r && typeof r === 'object' && typeof r.$value === 'string') xmlCandidate = r.$value;
-      else if (typeof r === 'string') xmlCandidate = r;
-    }
-    if (!xmlCandidate && typeof rawResponse === 'string') {
-      const m = String(rawResponse).match(/<cotacao[\s\S]*?<\/cotacao>/i);
-      if (m) xmlCandidate = m[0];
-    }
-    if (!xmlCandidate) {
-      return res.status(200).json({
-        debug: true,
-        message: 'Sem bloco <cotacao> detectado na resposta',
-        sentArgs: soapArgs,
-        rawResponseSnippet: typeof rawResponse === 'string' ? rawResponse.slice(0, 1500) : null,
-        lastRequest
+    // ---- validação amigável ----
+    const v = validateBody(body);
+    if (!v.ok) {
+      return res.status(400).json({
+        error: 'Entrada inválida',
+        details: v.errors.join('; ')
       });
     }
 
-    const cotacaoXml = xmlCandidate;
-    const erro = parseInt(getTag(cotacaoXml, 'erro') || '0', 10);
-    const mensagem = getTag(cotacaoXml, 'mensagem') || '';
-    const fretePt = getTag(cotacaoXml, 'frete');
-    const prazo = parseInt(getTag(cotacaoXml, 'prazo') || '0', 10);
-    const cotacaoNum = getTag(cotacaoXml, 'cotacao') || '';
-    const token = getTag(cotacaoXml, 'token') || '';
-    const valorFrete = decFromPt(fretePt);
+    // ---- normalizações/valores padrão ----
+    const dominio = (body.dominio || 'OST').toString().toUpperCase();
+    const login = body.login || 'cotawa';
+    const senha = body.senha || '123456';
 
-    if (Number.isFinite(erro) && erro !== 0) {
+    const cnpjPagador = padCpfToCnpj(body.cnpjPagador);
+    const senhaPagador = body.senhaPagador || '1234';
+
+    const cepOrigem = onlyDigits(body.cepOrigem);
+    const cepDestino = onlyDigits(body.cepDestino);
+
+    const valorMercadoriaRaw = body.valorMercadoria ?? body.valorNF;
+    const valorNF = toFixedOrZero(valorMercadoriaRaw, 2);
+
+    const quantidade = parseInt(body.quantidade ?? '1', 10) || 1;
+
+    const pesoStr = toFixedOrZero(body.peso, 3);     // "23.000"
+    const volumeStr = toFixedOrZero(body.volume, 4); // "0.2700"
+
+    const mercadoria = parseInt(body.mercadoria ?? 1, 10) || 1;
+
+    const tipo = toUpper(body.ciffob);
+    const ciffob = (tipo === 'C' || tipo === 'CIF') ? 'C' : 'F';
+
+    // documentos — aceita CPF (11d) e faz zeropad p/14
+    const cnpjRemetente = padCpfToCnpj(body.cnpjRemetente || '');
+    const cnpjDestinatario = padCpfToCnpj(body.cnpjDestinatario || '');
+
+    const observacao = (body.observacao || '').toString();
+
+    const altura = toFixedOrZero(body.altura, 3);
+    const largura = toFixedOrZero(body.largura, 3);
+    const comprimento = toFixedOrZero(body.comprimento, 3);
+
+    // Extras: agora padrão é 'S' (coleta). Se vier definido, respeita.
+    const coletar = toUpper(body.coletar || 'S'); // <= mudança pedida
+    const trt = body.trt ?? '';
+    const entDificil = body.entDificil ?? '';
+    const destContribuinte = body.destContribuinte ?? '';
+    const qtdePares = body.qtdePares ?? '';
+    const fatorMultiplicador = body.fatorMultiplicador ?? '';
+
+    const args = {
+      dominio,
+      login,
+      senha,
+      cnpjPagador,
+      senhaPagador,
+      cepOrigem,
+      cepDestino,
+      valorNF,
+      quantidade,
+      peso: pesoStr,
+      volume: volumeStr,
+      mercadoria,
+      ciffob,
+      cnpjRemetente,
+      cnpjDestinatario,
+      observacao,
+      trt,
+      coletar,
+      entDificil,
+      destContribuinte,
+      qtdePares,
+      altura,
+      largura,
+      comprimento,
+      fatorMultiplicador
+    };
+
+    const soapEnvelope = buildSoapEnvelope(args);
+
+    // ---- chamada ao SSW ----
+    const { data: responseXml } = await axios.post(
+      'https://ssw.inf.br/ws/sswCotacaoColeta/index.php',
+      soapEnvelope,
+      {
+        headers: {
+          'Content-Type': 'text/xml; charset=utf-8',
+          'SOAPAction': 'urn:sswinfbr.sswCotacaoColeta#cotarSite'
+        },
+        timeout: 30000
+      }
+    );
+
+    // A resposta costuma vir com o XML de <cotacao> (sem o envelope SOAP)
+    // Vamos tentar extrair os campos via xml2js de forma tolerante.
+    let cotacaoXml = responseXml;
+    // Em alguns casos, a API retorna diretamente o XML <cotacao> como string literal.
+    // Em outros, pode vir um SOAP completo. Vamos procurar o primeiro "<cotacao".
+    const idx = responseXml.indexOf('<cotacao');
+    if (idx > -1) {
+      cotacaoXml = responseXml.slice(idx);
+      // corta depois do fechamento
+      const endIdx = cotacaoXml.indexOf('</cotacao>');
+      if (endIdx > -1) cotacaoXml = cotacaoXml.slice(0, endIdx + '</cotacao>'.length);
+    }
+
+    // Faz o parse do pedacinho de <cotacao>
+    const parsed = await parseStringPromise(cotacaoXml, { explicitArray: false, trim: true })
+      .catch(() => ({}));
+
+    const c = parsed?.cotacao || parsed || {};
+
+    const erro = parseInt((c.erro ?? '1'), 10) || 0;
+    const mensagem = c.mensagem ?? '';
+    const frete = parseFrete(c.frete);
+    const prazo = parseInt(c.prazo ?? '0', 10) || 0;
+    const numeroCotacao = c.cotacao ?? '';
+    const token = c.token ?? '';
+
+    if (erro && erro !== 0) {
+      // erro do SSW
       return res.status(422).json({
         error: 'SSW retornou erro',
         ssw: { erro, mensagem },
         detalhes: { cotacaoXml },
-        sentArgs: soapArgs,
-        lastRequest
+        sentArgs: args,
+        lastRequest: soapEnvelope
       });
     }
 
+    // sucesso
     return res.status(200).json({
       ok: true,
-      valorFrete,
+      valorFrete: frete,
       prazoEntrega: prazo,
-      numeroCotacao: cotacaoNum,
+      numeroCotacao,
       token,
-      mensagem,
-      lastRequest
+      mensagem: mensagem || 'OK',
+      lastRequest: soapEnvelope
     });
+
   } catch (err) {
+    const details = (err && err.response && err.response.data) ? err.response.data : (err?.message || String(err));
     return res.status(500).json({
       error: 'Erro ao consultar cotação na SSW',
-      details: err.message
+      details
     });
   }
-}
+};
