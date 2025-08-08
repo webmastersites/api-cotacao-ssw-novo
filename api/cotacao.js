@@ -12,12 +12,8 @@ const onlyDigits = s => toStr(s).replace(/\D/g, '');
 const normDecimalStr = (val) => {
   if (val === undefined || val === null || val === '') return null;
   const s = toStr(val);
-  if (s.includes(',')) {
-    // tem vírgula -> remover pontos de milhar e trocar vírgula por ponto
-    return s.replace(/\./g, '').replace(',', '.');
-  }
-  // sem vírgula -> manter ponto como decimal
-  return s;
+  if (s.includes(',')) return s.replace(/\./g, '').replace(',', '.');
+  return s; // já está com ponto, mantém
 };
 
 const toDec = v => {
@@ -89,7 +85,16 @@ export default async function handler(req, res) {
     const ciffob = toStr(b.ciffob).toUpperCase().replace(/[^CF]/g, '').charAt(0) || 'F';
     const observacao = toStr(b.observacao).slice(0, 195);
     const mercadoria = '1';
-    const coletar = toStr(b.coletar).toUpperCase().startsWith('S') ? 'S' : 'N'; // default N conforme erro da SSW
+
+    // coletar obrigatório (WSDL): "S" ou "N"
+    const coletar = toStr(b.coletar).toUpperCase().startsWith('S') ? 'S' : 'N';
+
+    // extras do WSDL (vamos enviar vazios por padrão)
+    const trt = '';                 // xsd:string
+    const entDificil = '';          // xsd:string
+    const destContribuinte = '';    // xsd:string
+    const qtdePares = '';           // xsd:integer (vazio = não envia valor)
+    const fatorMultiplicador = '';  // xsd:integer (vazio = não envia valor)
 
     // validações essenciais
     const errs = [];
@@ -108,10 +113,10 @@ export default async function handler(req, res) {
       dominio, login, senha,
       cnpjPagador, senhaPagador,
       cepOrigem, cepDestino,
-      valorNF: fmt(valorNFnum, 2),                  // "1500.00"
-      quantidade: String(quantidade),               // "1"
-      peso: fmt(pesoNum, 3),                        // "23.000"
-      volume: volumeNum != null ? fmt(volumeNum, 4) : "", // "0.2700" ou ""
+      valorNF: fmt(valorNFnum, 2),                       // "1500.00"
+      quantidade: String(quantidade),                    // "1"
+      peso: fmt(pesoNum, 3),                             // "23.000"
+      volume: volumeNum != null ? fmt(volumeNum, 4) : "",// "0.2700" ou ""
       mercadoria, ciffob,
       cnpjRemetente: cnpjRemetente || "",
       cnpjDestinatario: cnpjDestinatario || "",
@@ -119,7 +124,13 @@ export default async function handler(req, res) {
       altura: alturaNum != null ? fmt(alturaNum, 3) : "",
       largura: larguraNum != null ? fmt(larguraNum, 3) : "",
       comprimento: comprimentoNum != null ? fmt(comprimentoNum, 3) : "",
-      coletar // "S" ou "N" — exigido pela SSW
+      coletar,                                           // "S" ou "N"
+      // Extras opcionais do WSDL — enviados vazios:
+      trt,
+      entDificil,
+      destContribuinte,
+      qtdePares,
+      fatorMultiplicador
     };
 
     const soapUrl = 'https://ssw.inf.br/ws/sswCotacaoColeta/index.php?wsdl';
