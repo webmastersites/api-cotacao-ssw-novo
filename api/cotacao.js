@@ -74,7 +74,8 @@ export default async function handler(req, res) {
     if (!rawXml) {
       return res.status(422).json({
         error: 'SSW retornou resposta vazia',
-        sentArgs: args
+        sentArgs: args,
+        lastRequest: client.lastRequest || null
       });
     }
 
@@ -86,7 +87,8 @@ export default async function handler(req, res) {
         error: 'SSW retornou erro',
         ssw: cotacao,
         detalhes: { cotacaoXml: rawXml },
-        sentArgs: args
+        sentArgs: args,
+        lastRequest: client.lastRequest || null
       });
     }
 
