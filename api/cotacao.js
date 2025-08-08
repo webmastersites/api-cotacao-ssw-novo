@@ -4,31 +4,24 @@ import { createClientAsync } from 'soap';
 const toStr = v => (v ?? '').toString().trim();
 const onlyDigits = s => toStr(s).replace(/\D/g, '');
 
-// Normaliza decimal aceitando ambos formatos:
-// - "1.500,00" -> "1500.00"
-// - "1500.00"  -> "1500.00"
-// - "0,27"     -> "0.27"
-// - "0.27"     -> "0.27"
+// "1.500,00"->"1500.00", "1500.00"->"1500.00", "0,27"->"0.27", "0.27"->"0.27"
 const normDecimalStr = (val) => {
   if (val === undefined || val === null || val === '') return null;
   const s = toStr(val);
   if (s.includes(',')) return s.replace(/\./g, '').replace(',', '.');
-  return s; // já está com ponto, mantém
+  return s;
 };
-
 const toDec = v => {
   const s = normDecimalStr(v);
   if (s === null) return null;
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 };
-
 const toInt = v => {
   if (v === undefined || v === null || v === '') return null;
   const n = parseInt(onlyDigits(v), 10);
   return Number.isFinite(n) ? n : null;
 };
-
 const fmt = (n, places) => {
   const x = Number(n);
   return Number.isFinite(x) ? x.toFixed(places) : '';
@@ -66,7 +59,7 @@ export default async function handler(req, res) {
     const senha = '123456';
     const senhaPagador = '1234';
 
-    // sanitização de entrada
+    // sanitização
     const cnpjPagador = onlyDigits(b.cnpjPagador);
     const cnpjRemetente = onlyDigits(b.remetente?.cnpj);
     const cnpjDestinatario = onlyDigits(b.destinatario?.cnpj);
@@ -86,17 +79,17 @@ export default async function handler(req, res) {
     const observacao = toStr(b.observacao).slice(0, 195);
     const mercadoria = '1';
 
-    // coletar obrigatório (WSDL): "S" ou "N"
+    // coletar obrigatório: "S" ou "N"
     const coletar = toStr(b.coletar).toUpperCase().startsWith('S') ? 'S' : 'N';
 
-    // extras do WSDL (vamos enviar vazios por padrão)
-    const trt = '';                 // xsd:string
-    const entDificil = '';          // xsd:string
-    const destContribuinte = '';    // xsd:string
-    const qtdePares = '';           // xsd:integer (vazio = não envia valor)
-    const fatorMultiplicador = '';  // xsd:integer (vazio = não envia valor)
+    // extras do WSDL (vamos enviar vazios)
+    const trt = '';
+    const entDificil = '';
+    const destContribuinte = '';
+    const qtdePares = '';          // integer opcional – vazio
+    const fatorMultiplicador = ''; // integer opcional – vazio
 
-    // validações essenciais
+    // validações básicas
     const errs = [];
     if (!cnpjPagador) errs.push('cnpjPagador é obrigatório');
     if (!cepOrigem) errs.push('cepOrigem é obrigatório');
@@ -108,30 +101,35 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'Entrada inválida', details: errs.join('; ') });
     }
 
-    // formatos exigidos pela doc (ponto, casas definidas)
-    const soapArgs = {
-      dominio, login, senha,
-      cnpjPagador, senhaPagador,
-      cepOrigem, cepDestino,
-      valorNF: fmt(valorNFnum, 2),                       // "1500.00"
-      quantidade: String(quantidade),                    // "1"
-      peso: fmt(pesoNum, 3),                             // "23.000"
-      volume: volumeNum != null ? fmt(volumeNum, 4) : "",// "0.2700" ou ""
-      mercadoria, ciffob,
-      cnpjRemetente: cnpjRemetente || "",
-      cnpjDestinatario: cnpjDestinatario || "",
-      observacao,
-      altura: alturaNum != null ? fmt(alturaNum, 3) : "",
-      largura: larguraNum != null ? fmt(larguraNum, 3) : "",
-      comprimento: comprimentoNum != null ? fmt(comprimentoNum, 3) : "",
-      coletar,                                           // "S" ou "N"
-      // Extras opcionais do WSDL — enviados vazios:
-      trt,
-      entDificil,
-      destContribuinte,
-      qtdePares,
-      fatorMultiplicador
-    };
+    // MONTAÇÃO EM ORDEM EXATA DO WSDL (rpc/encoded é chato com ordem):
+    const orderedEntries = [
+      ['dominio', dominio],
+      ['login', login],
+      ['senha', senha],
+      ['cnpjPagador', cnpjPagador],
+      ['senhaPagador', senhaPagador],
+      ['cepOrigem', cepOrigem],
+      ['cepDestino', cepDestino],
+      ['valorNF', fmt(valorNFnum, 2)],                 // 1500.00
+      ['quantidade', String(quantidade)],              // "1"
+      ['peso', fmt(pesoNum, 3)],                       // 23.000
+      ['volume', volumeNum != null ? fmt(volumeNum, 4) : ''], // 0.2700
+      ['mercadoria', mercadoria],
+      ['ciffob', ciffob],
+      ['cnpjRemetente', cnpjRemetente || ''],
+      ['cnpjDestinatario', cnpjDestinatario || ''],
+      ['observacao', observacao],
+      ['trt', trt],
+      ['coletar', coletar],              // <<< AQUI, na posição certa
+      ['entDificil', entDificil],
+      ['destContribuinte', destContribuinte],
+      ['qtdePares', qtdePares],
+      ['altura', alturaNum != null ? fmt(alturaNum, 3) : ''],
+      ['largura', larguraNum != null ? fmt(larguraNum, 3) : ''],
+      ['comprimento', comprimentoNum != null ? fmt(comprimentoNum, 3) : ''],
+      ['fatorMultiplicador', fatorMultiplicador]
+    ];
+    const soapArgs = orderedEntries.reduce((acc, [k, v]) => { acc[k] = v; return acc; }, {});
 
     const soapUrl = 'https://ssw.inf.br/ws/sswCotacaoColeta/index.php?wsdl';
     const client = await createClientAsync(soapUrl);
@@ -140,7 +138,7 @@ export default async function handler(req, res) {
     const [result, rawResponse, soapHeader, rawRequest] = await client.cotarSiteAsync(soapArgs);
     const lastRequest = client.lastRequest || rawRequest || null;
 
-    // tentar obter XML de retorno
+    // tenta obter XML de retorno
     let xmlCandidate = null;
     if (result && typeof result === 'object') {
       const r = result.return;
@@ -148,8 +146,8 @@ export default async function handler(req, res) {
       else if (typeof r === 'string') xmlCandidate = r;
     }
     if (!xmlCandidate && typeof rawResponse === 'string') {
-      const extracted = extractCotacaoXml(rawResponse);
-      if (extracted) xmlCandidate = extracted;
+      const m = String(rawResponse).match(/<cotacao[\s\S]*?<\/cotacao>/i);
+      if (m) xmlCandidate = m[0];
     }
     if (!xmlCandidate) {
       return res.status(200).json({
@@ -161,8 +159,7 @@ export default async function handler(req, res) {
       });
     }
 
-    const cotacaoXml = extractCotacaoXml(xmlCandidate) || xmlCandidate;
-
+    const cotacaoXml = xmlCandidate;
     const erro = parseInt(getTag(cotacaoXml, 'erro') || '0', 10);
     const mensagem = getTag(cotacaoXml, 'mensagem') || '';
     const fretePt = getTag(cotacaoXml, 'frete');
