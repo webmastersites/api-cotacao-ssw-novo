@@ -13,14 +13,13 @@ const toInt = v => {
   const n = parseInt(onlyDigits(v), 10);
   return Number.isFinite(n) ? n : null;
 };
-// formato com ponto (enviado ao SSW)
 const fmtDot = (n, places) => {
   const num = Number(n);
   if (!Number.isFinite(num)) return '';
-  return num.toFixed(places); // usa ponto
+  return num.toFixed(places); // ponto
 };
 
-// ===== Parse XML <cotacao> =====
+// ===== XML utils =====
 const extractCotacaoXml = (text) => {
   if (!text) return null;
   const m = String(text).match(/<cotacao[\s\S]*?<\/cotacao>/i);
@@ -46,13 +45,13 @@ export default async function handler(req, res) {
 
   const raw = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
 
-  // --- credenciais fixas (como você pediu)
+  // Credenciais fixas
   const dominio = 'OST';
   const login = 'cotawa';
   const senha = '123456';
   const senhaPagador = '1234';
 
-  // --- sanitização dos variáveis
+  // Dados do body (sanitizados)
   const cnpjPagador = onlyDigits(raw.cnpjPagador);
   const cnpjRemetente = onlyDigits(raw.remetente?.cnpj);
   const cnpjDestinatario = onlyDigits(raw.destinatario?.cnpj);
@@ -72,7 +71,7 @@ export default async function handler(req, res) {
   const observacao = toStr(raw.observacao).slice(0, 195);
   const mercadoria = '1';
 
-  // --- validações essenciais da doc
+  // Validações mínimas
   const errs = [];
   if (!cnpjPagador) errs.push('cnpjPagador é obrigatório');
   if (!cepOrigem) errs.push('cepOrigem é obrigatório');
@@ -86,29 +85,27 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Entrada inválida', details: errs.join('; ') });
   }
 
-  // --- formatos EXATOS de envio (doc: decimal aceita X casas; exemplos usam ponto)
+  // Formatos exigidos pela doc
   const soapArgs = {
-    dominio,             // string
-    login,               // string
-    senha,               // string
-    cnpjPagador,         // string só dígitos
-    senhaPagador,        // string
-    cepOrigem,           // string só dígitos
-    cepDestino,          // string só dígitos
-    valorNF: fmtDot(valorNFnum, 2),    // "1500.00"
-    quantidade: String(quantidade),    // "1"
-    peso: fmtDot(pesoNum ?? 0, 3),     // "23.000"  <<< 3 casas, ponto
+    dominio,
+    login,
+    senha,
+    cnpjPagador,
+    senhaPagador,
+    cepOrigem,
+    cepDestino,
+    valorNF: fmtDot(valorNFnum, 2),              // "1500.00"
+    quantidade: String(quantidade),              // "1"
+    peso: fmtDot(pesoNum ?? 0, 3),               // "23.000"
     volume: volumeNum != null ? fmtDot(volumeNum, 4) : "", // "0.2700" ou ""
-    mercadoria,          // "1"
-    ciffob,              // "C"|"F"
+    mercadoria,                                  // "1"
+    ciffob,
     cnpjRemetente: cnpjRemetente || "",
     cnpjDestinatario: cnpjDestinatario || "",
-    observacao,          // string
-    // Dimensões (m) — doc: altura decimal, largura/comprimento aparecem como integer/decimal na ajuda; enviamos decimal
+    observacao,
     altura: alturaNum != null ? fmtDot(alturaNum, 3) : "",
     largura: larguraNum != null ? fmtDot(larguraNum, 3) : "",
     comprimento: comprimentoNum != null ? fmtDot(comprimentoNum, 3) : ""
-    // tipoFrete/tipoEntrega: deixar vazio se não usar
   };
 
   try {
@@ -116,18 +113,12 @@ export default async function handler(req, res) {
     const client = await createClientAsync(soapUrl);
     client.setEndpoint('https://ssw.inf.br/ws/sswCotacaoColeta/index.php');
 
-    // Log do request que será enviado (sem senhas)
-    const safeArgs = { ...soapArgs, senha: '***', senhaPagador: '***' };
-    console.log('[SOAP][args]', JSON.stringify(safeArgs));
-
-    // A doc do seu print usa cotarSite()
+    // Chama cotarSite
     const [resultObj] = await client.cotarSiteAsync(soapArgs);
-    console.log('[SOAP][lastRequest]', client.lastRequest?.slice?.(0, 1200));
 
-    // String XML vem em return.$value
+    // Extrai XML de retorno
     let xmlString = resultObj?.return?.$value || '';
     if (!xmlString) {
-      // fallback: varre qualquer propriedade por <cotacao>...</cotacao>
       const scan = (obj) => {
         if (!obj || typeof obj !== 'object') return null;
         for (const v of Object.values(obj)) {
@@ -143,8 +134,15 @@ export default async function handler(req, res) {
     }
 
     const cotacaoXml = extractCotacaoXml(xmlString);
+
+    // Se não veio XML, devolve o request enviado para debug
     if (!cotacaoXml) {
-      return res.status(200).json({ debug: { resultObj } });
+      return res.status(200).json({
+        debug: true,
+        sentArgs: soapArgs,
+        lastRequestSnippet: client.lastRequest?.slice?.(0, 2000) || null,
+        resultObj
+      });
     }
 
     const erro = parseInt(getTag(cotacaoXml, 'erro') || '0', 10);
@@ -156,11 +154,13 @@ export default async function handler(req, res) {
     const valorFrete = decFromPt(fretePt);
 
     if (Number.isFinite(erro) && erro !== 0) {
-      const code = (erro === -2 || /LOGIN/i.test(mensagem)) ? 401 : 422;
-      return res.status(code).json({
+      // >>>>>> AQUI devolvemos também o envelope enviado <<<<<<
+      return res.status(422).json({
         error: 'SSW retornou erro',
         ssw: { erro, mensagem },
-        detalhes: { cotacaoXml }
+        detalhes: { cotacaoXml },
+        sentArgs: soapArgs,
+        lastRequestSnippet: client.lastRequest?.slice?.(0, 2000) || null
       });
     }
 
@@ -174,7 +174,6 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     const status = err.status || 500;
-    console.error('[cotacao][erro]', { status, message: err.message });
     return res.status(status).json({
       error: status === 400 ? 'Entrada inválida' : 'Erro ao consultar cotação na SSW',
       details: err.message
